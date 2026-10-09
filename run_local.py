@@ -24,6 +24,31 @@ try:
 except Exception:
     pass
 
+
+def _disable_quick_edit():
+    """Запретить QuickEdit в консоли.
+
+    Клик мышью по чёрному окну включает выделение текста и ПАУЗИРУЕТ
+    вывод — бот вечно зависает на print(). Отключаем, чтобы окно было
+    только для чтения (клик не мешает работе).
+    """
+    try:
+        import ctypes
+        STD_INPUT_HANDLE = -10
+        ENABLE_QUICK_EDIT = 0x40
+        ENABLE_EXTENDED = 0x80
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            new_mode = (mode.value & ~ENABLE_QUICK_EDIT) | ENABLE_EXTENDED
+            kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:
+        pass
+
+
+_disable_quick_edit()
+
 import requests
 
 import bot
