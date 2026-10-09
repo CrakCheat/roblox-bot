@@ -90,18 +90,6 @@ class Database:
                 )
             """)
             
-            # Таблица для истории изменений цен
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS price_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    game TEXT NOT NULL,
-                    item_name TEXT NOT NULL,
-                    price REAL NOT NULL,
-                    change_percent REAL,
-                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
             await db.commit()
 
     async def add_deal(self, game: str, item_name: str, price: float, 

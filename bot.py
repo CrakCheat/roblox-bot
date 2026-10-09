@@ -20,12 +20,12 @@ from telegram.ext import (
 )
 from database import Database
 from parsers import parse_all_games, init_market_prices_with_api
-from price_tracker import PriceTracker
 from config import (
     BOT_TOKEN, PROXY_URL, DB_PATH, GAMES, CHECK_INTERVAL_MINUTES, PRICE_THRESHOLD_PERCENT,
     REQUIRE_TARGET_PRICE,
     SUGGEST_ITEM_ENABLED, SUGGEST_ITEM_MIN_COUNT, SUGGEST_ITEM_MIN_PRICE, 
-    SUGGEST_ITEM_MAX_PRICE, WHITELIST_ENABLED, WHITELIST_USERS, ADMIN_IDS
+    SUGGEST_ITEM_MAX_PRICE, WHITELIST_ENABLED, WHITELIST_USERS, ADMIN_IDS,
+    NOTIFY_USER_IDS,
 )
 
 # Настройка логирования
@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 # Инициализация
 db = Database(DB_PATH)
-price_tracker = PriceTracker(db)
 
 def is_user_allowed(user_id: int) -> bool:
     """Проверка, разрешен ли пользователь"""
@@ -130,13 +129,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /additem - Добавить товар в список
 
 📊 *Как это работает:*
-1. Я проверяю цены на маркетплейсе GGSel (реальные лоты)
-2. Сравниваю с рыночной ценой
-3. Если нахожу выгодное предложение (дешевле на 20%+), отправляю уведомление
+1. Я проверяю лоты на GGSel, FunPay и PlayerOK
+2. Сравниваю с вашими ценами из config.py
+3. Если лот дешевле вашей цены — отправляю уведомление
 
 💡 *Советы:*
-• Подпишитесь на интересующие игры
-• Установите минимальный процент скидки
+• Задавайте нужные цены в config.py
 • Проверяйте цены регулярно
 • Добавляйте свои товары в список
 
@@ -224,8 +222,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.edit_message_text(
                 f"✅ Вы подписались на уведомления по игре *{game_info['name']}*!\n\n"
-                f"Я буду отправлять вам уведомления, когда появятся предложения "
-                f"со скидкой от {PRICE_THRESHOLD_PERCENT}%.",
+                + (
+                    "Я буду присылать лоты дешевле цен из config.py."
+                    if REQUIRE_TARGET_PRICE else
+                    f"Я буду присылать предложения со скидкой от "
+                    f"{PRICE_THRESHOLD_PERCENT}% или дешевле вашей цены."
+                ),
                 parse_mode='Markdown'
             )
     
@@ -361,8 +363,6 @@ def format_deal_card(deal) -> str:
     if deal.get('target_price'):
         card += f"🎯 Моя цена: {deal['target_price']:.0f} ₽ — лот дешевле ✅\n"
     card += (
-        f"📊 Рыночная цена: {deal['market_price']:.0f} ₽\n"
-        f"📉 Скидка: *{deal['discount_percent']:.1f}%*\n"
         f"🏪 Источник: {deal['source']}\n"
         f"🔗 [Купить на маркетплейсе]({deal['url']})\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -387,12 +387,12 @@ async def run_check() -> list:
         if extra:
             offers += await parse_all_games(extra, reset_cache=False)
 
-    # Обновляем рыночные цены и историю изменений цен
+    # Обновляем рыночные цены (медианы) — история изменений цен убрана
     seen = {}
     for offer in offers:
         seen[(offer['game'], offer['item_name'])] = offer
     for (game_key, item_name), offer in seen.items():
-        await price_tracker.record(
+        await db.update_market_price(
             game_key, item_name,
             offer['market_price'], offer['min_price'], offer['max_price']
         )
@@ -428,7 +428,9 @@ async def send_deals(send_func, deals: list) -> int:
 
     sent = 0
     for game_key, lst in by_game.items():
-        users = await db.get_subscribed_users(game_key)
+        # Кому слать: подписчики игры + всегда NOTIFY_USER_IDS из config.py
+        users = set(await db.get_subscribed_users(game_key))
+        users.update(NOTIFY_USER_IDS)
         if not users:
             continue
         lst = lst[:5]
@@ -436,14 +438,18 @@ async def send_deals(send_func, deals: list) -> int:
         text = f"🔥 *Выгодные предложения — {game_name}:*\n\n"
         for deal in lst:
             text += format_deal_card(deal)
+        delivered = 0
         for user_id in users:
             try:
                 await send_func(user_id, text)
-                sent += 1
+                delivered += 1
             except Exception as e:
                 logger.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
-        for deal in lst:
-            await db.mark_as_notified(deal['id'])
+        # Помечаем отправленным, только если сообщение реально ушло
+        if delivered:
+            sent += delivered
+            for deal in lst:
+                await db.mark_as_notified(deal['id'])
     return sent
 
 
@@ -462,39 +468,8 @@ async def check_deals(context: ContextTypes.DEFAULT_TYPE):
         if SUGGEST_ITEM_ENABLED:
             await suggest_new_items(context)
 
-        # === Проверка изменений цен ===
-        await check_price_changes(context)
     except Exception as e:
         logger.error(f"Ошибка проверки цен: {e}")
-
-
-async def check_price_changes(context: ContextTypes.DEFAULT_TYPE):
-    """Проверка значительных изменений цен"""
-    alerts = await price_tracker.get_price_alerts(change_threshold=15)
-    
-    for alert in alerts:
-        subscribed_users = await db.get_subscribed_users(alert['game'])
-        
-        for user_id in subscribed_users:
-            try:
-                trend_emoji = "📈" if alert['change_percent'] > 0 else "📉"
-                
-                text = (
-                    f"{trend_emoji} *Изменение цены!*\n\n"
-                    f"📦 Предмет: {_md(alert['item_name'])}\n"
-                    f"🎮 Игра: {alert['game_name']}\n"
-                    f"📉 Изменение: {alert['change_percent']:+.1f}%\n"
-                    f"💰 Средняя цена: {alert['price']:.0f} ₽"
-                )
-                
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    parse_mode='Markdown'
-                )
-                
-            except Exception as e:
-                logger.error(f"Ошибка при отправке уведомления об изменении цены: {e}")
 
 
 async def suggest_new_items(context: ContextTypes.DEFAULT_TYPE):

@@ -20,7 +20,7 @@ except Exception:
 import requests
 
 import bot
-from bot import _md, format_deal_card, run_check
+from bot import format_deal_card, run_check
 from config import (
     BOT_TOKEN, GAMES, NOTIFY_USER_IDS, PRICE_THRESHOLD_PERCENT, DB_PATH,
 )
@@ -75,12 +75,13 @@ async def main() -> int:
 
     await bot.db.init()
 
-    # Основная проверка: парсинг (GGSel + FunPay + PlayerOK), рынок, сделки, история
+    # Основная проверка: парсинг (GGSel + FunPay + PlayerOK), рынок, сделки
     added = await run_check()
     log(f"Новых выгодных предложений: {len(added)}")
     for d in added:
-        log(f"  + [{d['source']}] {d['item_name']}: {d['price']:.0f} ₽ "
-            f"(рынок {d['market_price']:.0f} ₽, -{d['discount_percent']:.1f}%) {d['url']}")
+        log(f"  + [{d['source']}] {d['item_name']}: {d['price']:.0f} ₽"
+            + (f" (моя цена {d['target_price']:.0f} ₽)" if d.get('target_price') else "")
+            + f" {d['url']}")
 
     # Диагностика: сколько сделок по источникам в базе вообще
     by_source = await bot.db.count_deals_by_source()
@@ -135,21 +136,6 @@ async def main() -> int:
             log(f"Отправлено сделок по игре {game_name}: {len(deals)}")
         else:
             log(f"  Не удалось отправить сделки по игре {game_key} — останутся в очереди")
-
-    # Оповещения о резких изменениях цен (>=15% за сутки)
-    alerts = await bot.price_tracker.get_price_alerts(change_threshold=15)
-    for alert in alerts[:5]:
-        emoji = "📈" if alert['change_percent'] > 0 else "📉"
-        text = (
-            f"{emoji} *Изменение цены!*\n\n"
-            f"📦 Предмет: {_md(alert['item_name'])}\n"
-            f"🎮 Игра: {alert['game_name']}\n"
-            f"📉 Изменение: {alert['change_percent']:+.1f}%\n"
-            f"💰 Средняя цена: {alert['price']:.0f} ₽"
-        )
-        for user_id in NOTIFY_USER_IDS:
-            if tg_send(user_id, text):
-                sent_ok += 1
 
     log(f"Отправлено сообщений: {sent_ok}, ошибок отправки: {send_fail}")
     log(f"База: {DB_PATH}")

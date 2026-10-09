@@ -62,12 +62,6 @@ async def main():
             dupes += 1
     print(f"[7] Сделок уже в БД (анти-дубль): {dupes}/{len(added)}")
 
-    # 8) История цен и тренды
-    tracker = bot.price_tracker
-    trend = await tracker.get_price_trend('mm2', 'Icepiercer', days=7)
-    alerts = await tracker.get_price_alerts(change_threshold=0)
-    print(f"[8] Тренд Icepiercer: {trend} | записей истории: {len(alerts)}")
-
     # 9) Формат списка товаров
     print("[9] " + bot.format_user_items(await bot.db.get_user_items(user_id)))
 

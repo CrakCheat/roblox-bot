@@ -40,7 +40,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: python check_once.py
 
-      # deals.db (подписки, сделки, история цен) и last_run_report.txt
+      # deals.db (сделки, списки) и last_run_report.txt
       # (итог последней проверки) сохраняются в репозиторий,
       # run_day.txt меняется раз в день — чтобы GitHub не отключил
       # расписание за 60 дней «без активности» репозитория.
