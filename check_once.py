@@ -1,6 +1,6 @@
 """Одна проверка для GitHub Actions: парсинг -> БД -> отправка -> выход.
 
-Запускается workflow'ом каждые 5 минут. Без long-polling: только уведомления.
+Запускается workflow'ом по кнопке Run workflow. Без long-polling: только уведомления.
 Подписки и списки хранятся в deals.db (коммитится в репозиторий),
 пользовательский список также редактируется в config.py прямо на GitHub.
 
@@ -111,31 +111,28 @@ async def main() -> int:
                 send_fail += 1
 
     # Отправляем все неуведомленные сделки (в т.ч. если прошлая отправка падала)
+    # — каждое предложение отдельным сообщением
     for game_key in GAMES:
         deals = await bot.db.get_unnotified_deals(game_key, PRICE_THRESHOLD_PERCENT)
         if not deals:
             continue
-        deals = deals[:5]  # не больше 5 карточек на игру за рассылку
 
         game_name = GAMES.get(game_key, {}).get('name', game_key)
-        text = f"🔥 *Выгодные предложения — {game_name}:*\n\n"
         for deal in deals:
-            text += format_deal_card(deal)
+            text = f"🔥 *Новое предложение — {game_name}:*\n\n" + format_deal_card(deal)
+            delivered = False
+            for user_id in NOTIFY_USER_IDS:
+                if tg_send(user_id, text):
+                    delivered = True
+                    sent_ok += 1
+                else:
+                    send_fail += 1
 
-        delivered = False
-        for user_id in NOTIFY_USER_IDS:
-            if tg_send(user_id, text):
-                delivered = True
-                sent_ok += 1
-            else:
-                send_fail += 1
-
-        if delivered:
-            for deal in deals:
+            if delivered:
                 await bot.db.mark_as_notified(deal['id'])
-            log(f"Отправлено сделок по игре {game_name}: {len(deals)}")
-        else:
-            log(f"  Не удалось отправить сделки по игре {game_key} — останутся в очереди")
+                log(f"Отправлено: {deal['item_name']} {deal['price']:.0f} ₽ ({game_name})")
+            else:
+                log(f"  Не удалось отправить {deal['item_name']} — останется в очереди")
 
     log(f"Отправлено сообщений: {sent_ok}, ошибок отправки: {send_fail}")
     log(f"База: {DB_PATH}")

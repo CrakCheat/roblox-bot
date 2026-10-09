@@ -19,7 +19,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from database import Database
-from parsers import parse_all_games, init_market_prices_with_api
+from parsers import parse_all_games, init_market_prices_with_api, get_candidates
 from config import (
     BOT_TOKEN, PROXY_URL, DB_PATH, GAMES, CHECK_INTERVAL_MINUTES, PRICE_THRESHOLD_PERCENT,
     REQUIRE_TARGET_PRICE,
@@ -315,19 +315,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith('suggest_yes|'):
         _, game, item_name = data.split('|', 2)
         game_info = GAMES.get(game)
-        
-        if game_info and item_name in game_info['items']:
-            min_price = game_info['items'][item_name]
-            await db.add_user_item(query.from_user.id, game, item_name, min_price)
-            
+
+        if game_info:
+            # Порог — текущая средняя цена товара (ловим ниже среднего)
+            mp = await db.get_market_price(game, item_name)
+            price = round(mp['avg_price']) if mp else SUGGEST_ITEM_MAX_PRICE
+            await db.add_user_item(query.from_user.id, game, item_name, price)
+            await db.mark_item_as_suggested(game, item_name)
+
             await query.edit_message_text(
                 f"✅ Товар *{item_name}* добавлен в ваш список!\n\n"
                 f"🎮 Игра: {game_info['name']}\n"
-                f"💰 Минимальная цена: {min_price} ₽",
+                f"🎯 Уведомления: дешевле {price} ₽",
                 parse_mode='Markdown'
             )
         else:
-            await query.edit_message_text("❌ Товар не найден в списке отслеживаемых.")
+            await query.edit_message_text("❌ Неизвестная игра.")
     
     elif data.startswith('suggest_no|'):
         _, game, item_name = data.split('|', 2)
@@ -409,35 +412,37 @@ async def run_check() -> list:
                 offer.get('offer_name', ''), offer.get('target_price', 0)
             )
             added.append(offer)
+
+    # Посторонние товары (не из списка) — статистика для подсказок:
+    # «часто выставляют и стоит 100–2000 ₽ -> предложить».
+    # Каждый увиденный лот — плюс к частоте: больше лотов = чаще выставляют.
+    for cand in get_candidates():
+        for _ in range(min(cand.get("seen", 1), 20)):
+            await db.update_item_frequency(cand['game'], cand['name'])
+        await db.update_market_price(cand['game'], cand['name'],
+                                     cand['avg'], cand['min'], cand['max'])
     return added
 
 
 async def send_deals(send_func, deals: list) -> int:
-    """Отправить новые сделки подписчикам игр.
+    """Отправить новые сделки подписчикам игр — каждую отдельным сообщением.
 
-    Одно сообщение с карточками на каждую игру (максимум 5 карточек).
     Сделки без подписчиков остаются в базе для меню игры.
     Возвращает количество отправленных сообщений.
     """
     if not deals:
         return 0
 
-    by_game = {}
-    for deal in deals:
-        by_game.setdefault(deal['game'], []).append(deal)
-
     sent = 0
-    for game_key, lst in by_game.items():
+    for deal in deals:
+        game_key = deal['game']
         # Кому слать: подписчики игры + всегда NOTIFY_USER_IDS из config.py
         users = set(await db.get_subscribed_users(game_key))
         users.update(NOTIFY_USER_IDS)
         if not users:
             continue
-        lst = lst[:5]
         game_name = GAMES.get(game_key, {}).get('name', game_key)
-        text = f"🔥 *Выгодные предложения — {game_name}:*\n\n"
-        for deal in lst:
-            text += format_deal_card(deal)
+        text = f"🔥 *Новое предложение — {game_name}:*\n\n" + format_deal_card(deal)
         delivered = 0
         for user_id in users:
             try:
@@ -448,8 +453,7 @@ async def send_deals(send_func, deals: list) -> int:
         # Помечаем отправленным, только если сообщение реально ушло
         if delivered:
             sent += delivered
-            for deal in lst:
-                await db.mark_as_notified(deal['id'])
+            await db.mark_as_notified(deal['id'])
     return sent
 
 
@@ -474,22 +478,32 @@ async def check_deals(context: ContextTypes.DEFAULT_TYPE):
 
 async def suggest_new_items(context: ContextTypes.DEFAULT_TYPE):
     """Предложение новых товаров для добавления в список"""
+    # Что уже отслеживается (config + списки пользователей) — не предлагаем
+    tracked = {g: {n.casefold() for n in (info.get('items') or {})}
+               for g, info in GAMES.items()}
+    for ui in await db.get_all_user_items():
+        tracked.setdefault(ui['game'], set()).add(ui['item_name'].casefold())
+
     for game_key, game_info in GAMES.items():
         # Получаем часто появляющиеся товары
         frequent_items = await db.get_frequent_items(game_key, SUGGEST_ITEM_MIN_COUNT)
-        
+
         for item in frequent_items:
             item_name = item['item_name']
-            
+            if item_name.casefold() in tracked.get(game_key, set()):
+                continue  # уже отслеживается
+
             # Проверяем цену
             market_price = await db.get_market_price(game_key, item_name)
             if market_price:
                 price = market_price['avg_price']
                 if SUGGEST_ITEM_MIN_PRICE <= price <= SUGGEST_ITEM_MAX_PRICE:
-                    # Получаем пользователей, подписанных на эту игру
-                    subscribed_users = await db.get_subscribed_users(game_key)
-                    
-                    for user_id in subscribed_users:
+                    # Кому слать: подписчики игры + всегда NOTIFY_USER_IDS
+                    users = set(await db.get_subscribed_users(game_key))
+                    users.update(NOTIFY_USER_IDS)
+
+                    sent_any = False
+                    for user_id in users:
                         try:
                             keyboard = [
                                 [
@@ -498,7 +512,7 @@ async def suggest_new_items(context: ContextTypes.DEFAULT_TYPE):
                                 ]
                             ]
                             reply_markup = InlineKeyboardMarkup(keyboard)
-                            
+
                             await context.bot.send_message(
                                 chat_id=user_id,
                                 text=(
@@ -513,9 +527,14 @@ async def suggest_new_items(context: ContextTypes.DEFAULT_TYPE):
                                 reply_markup=reply_markup,
                                 parse_mode='Markdown'
                             )
-                            
+                            sent_any = True
+
                         except Exception as e:
                             logger.error(f"Ошибка при отправке предложения пользователю {user_id}: {e}")
+
+                    # Отмечаем предложенным, чтобы не спамить каждую минуту
+                    if sent_any:
+                        await db.mark_item_as_suggested(game_key, item_name)
 
 
 async def add_user_to_whitelist(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -667,9 +686,10 @@ async def deals_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count += 1
 
     if count == 0:
+        every = "каждую минуту" if CHECK_INTERVAL_MINUTES == 1 else f"каждые {CHECK_INTERVAL_MINUTES} минут"
         text = ("Пока нет выгодных предложений.\n\n"
-                "Нажмите «🔍 Проверить цены» или подождите "
-                "автоматической проверки (каждые 5 минут).")
+                f"Нажмите «🔍 Проверить цены» или подождите "
+                f"автоматической проверки ({every}).")
     await update.message.reply_text(text, parse_mode='Markdown')
 
 

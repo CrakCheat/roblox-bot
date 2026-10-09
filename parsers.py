@@ -193,6 +193,77 @@ def _query_variants(item_name: str) -> List[str]:
     return variants
 
 
+# ------------------------------------------- кандидаты для подсказок
+# Посторонние товары (не из списка config), замеченные на площадках:
+# (game, имя в lower) -> {"name": как на площадке, "prices": [...]}.
+# Очищается в начале каждого цикла parse_all_games(reset_cache=True).
+_cand_key: Dict[Tuple[str, str], Dict] = {}
+_cand_urls: set = set()
+
+
+def _clean_candidate_name(raw: str) -> str:
+    """Нормализовать название постороннего товара для подсказки.
+
+    «Dough Fruit | ТЕСТО ФРУКТ 🍩» -> «Dough Fruit»,
+    «Creation [Mythical] — Blox Fruits» -> «Creation».
+    """
+    s = htmllib.unescape(raw or "")
+    m = re.search(r"[|—–(\[/]", s)
+    if m and m.start() > 0:
+        s = s[:m.start()]                      # отрезаем рекламный хвост
+    s = re.sub(r"[^\w\s\-./]+", " ", s, flags=re.UNICODE)   # эмодзи и символы
+    s = re.sub(r"\s+", " ", s).strip(" -./")
+    letters = re.sub(r"[^\w]", "", s, flags=re.UNICODE)
+    if len(letters) < 3 or len(s) > 40:
+        return ""
+    return s
+
+
+def _note_candidate(game_key: str, raw_name: str, price: float, url: str = ""):
+    """Запомнить посторонний товар — кандидат на предложение."""
+    if game_key not in GAMES or price <= 0:
+        return
+    if url:
+        if url in _cand_urls:
+            return
+        _cand_urls.add(url)
+    name = _clean_candidate_name(raw_name)
+    if not name:
+        return
+    # название самой игры — не товар
+    if name.casefold() == (GAMES[game_key].get("name") or "").casefold():
+        return
+    # уже отслеживаемый предмет (и варианты его названия) — не предлагаем
+    for tracked in (GAMES[game_key].get("items") or {}):
+        if _matches_item(tracked, name, game_key, require_marker=False):
+            return
+    rec = _cand_key.setdefault((game_key, name.casefold()),
+                               {"name": name, "prices": []})
+    rec["prices"].append(float(price))
+
+
+def get_candidates() -> List[Dict]:
+    """Кандидаты, замеченные за текущий цикл: {game, name, avg, min, max, seen}.
+
+    seen — сколько distintых лотов этого товара видно прямо сейчас:
+    чем чаще выставляют, тем больше число.
+    """
+    out: List[Dict] = []
+    for (game, _), rec in _cand_key.items():
+        prices = rec["prices"]
+        if not prices:
+            continue
+        out.append({
+            "game": game,
+            "name": rec["name"],
+            "avg": round(sum(prices) / len(prices)),
+            "min": round(min(prices)),
+            "max": round(max(prices)),
+            "seen": len(prices),
+        })
+    return out
+
+
 # ---------------------------------------------------------------- парсинг HTML
 
 def parse_cards(page_html: str) -> List[Dict]:
@@ -484,6 +555,9 @@ async def get_item_offers(game_key: str, item_name: str) -> List[Dict]:
                         offer.setdefault("seller", "—")
                         add(offer)
                         found_any = True
+                    else:
+                        _note_candidate(game_key, offer["name"], offer["price"],
+                                        offer.get("url", ""))
                 if found_any:
                     break
 
@@ -493,6 +567,9 @@ async def get_item_offers(game_key: str, item_name: str) -> List[Dict]:
                 if _is_relevant_offer(item_name, offer["name"], game_key,
                                       require_marker=False):
                     add(offer)
+                else:
+                    _note_candidate(game_key, offer["name"], offer["price"],
+                                    offer.get("url", ""))
 
         # PlayerOK: лоты каталога «Предметы» с фильтром сервера игры
         if "playerok" in SOURCES:
@@ -500,6 +577,9 @@ async def get_item_offers(game_key: str, item_name: str) -> List[Dict]:
                 if _is_relevant_offer(item_name, offer["name"], game_key,
                                       require_marker=False):
                     add(offer)
+                else:
+                    _note_candidate(game_key, offer["name"], offer["price"],
+                                    offer.get("url", ""))
 
         return results
 
@@ -519,9 +599,17 @@ async def parse_all_games(games: Optional[Dict] = None, reset_cache: bool = True
         parser.reset()
         funpay.reset()
         playerok.reset()
+        _cand_key.clear()
+        _cand_urls.clear()
     output: List[Dict] = []
 
     for game_key, info in games.items():
+        # Каталог GGSel смотрим целиком — там видны посторонние товары
+        # (кандидаты для подсказок «часто выставляют»)
+        if "ggsel" in SOURCES:
+            for offer in parser.catalog(game_key):
+                _note_candidate(game_key, offer["name"], offer["price"],
+                                offer.get("url", ""))
         for item_name, ref_price in (info.get("items") or {}).items():
             offers = await get_item_offers(game_key, item_name)
             if not offers:
@@ -534,7 +622,7 @@ async def parse_all_games(games: Optional[Dict] = None, reset_cache: bool = True
 
             for offer in offers:
                 discount = ((med - offer["price"]) / med * 100) if med > 0 else 0.0
-                target_hit = 0 < ref and offer["price"] <= ref
+                target_hit = 0 < ref and offer["price"] < ref
                 # REQUIRE_TARGET_PRICE=True — уведомляем только о лотах
                 # дешевле цены из config.py; иначе подходит и скидка от рынка.
                 if REQUIRE_TARGET_PRICE and ref > 0:
