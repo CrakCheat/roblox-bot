@@ -1,6 +1,5 @@
-=== Проверка выгодных предложений (GitHub Actions) — 2026-10-09 13:11 UTC ===
-Новых выгодных предложений: 1
-  + [PlayerOK] Dragon Fruit: 90 ₽ (рынок 90 ₽, -20.0%) https://playerok.com/a312ebd479c1-zdelayu-v-4-na-ful-krome-dragona
+=== Проверка выгодных предложений (GitHub Actions) — 2026-10-09 13:19 UTC ===
+Новых выгодных предложений: 0
 Всего сделок в базе: 249 | по источникам: {'FunPay': 216, 'GGSel': 17, 'PlayerOK': 16}
 Отправлено сделок по игре Blox Fruits: 5
 Отправлено сделок по игре Your Bizarre Adventure: 5
