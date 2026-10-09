@@ -17,6 +17,13 @@ DB_PATH = os.getenv("DB_PATH", "deals.db")
 CHECK_INTERVAL_MINUTES = 5  # Как часто проверять новые предложения
 PRICE_THRESHOLD_PERCENT = 20  # На сколько % цена должна быть ниже рынка
 
+# Источники лотов (можно отключить любой, убрав из списка):
+#   "ggsel"    — поиск ggsel.net
+#   "funpay"   — страницы лотов игр funpay.com
+#   "playerok" — каталог playerok.com (REST API)
+# Рыночная цена (медиана) считается по лотам всех включённых источников.
+SOURCES = ["ggsel", "funpay", "playerok"]
+
 # Настройки предложения новых товаров
 SUGGEST_ITEM_ENABLED = True  # Включить предложение новых товаров
 SUGGEST_ITEM_MIN_COUNT = 3  # Минимальное количество появлений для предложения
@@ -88,4 +95,4 @@ GAMES = {
 }
 
 # Источник цен — реальный маркетплейс (см. parsers.py)
-SOURCE_NAME = "GGSel.net"
+SOURCE_NAME = "GGSel.net + FunPay + PlayerOK"

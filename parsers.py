@@ -1,8 +1,13 @@
-"""Реальный парсер цен с маркетплейса ggsel.net.
+"""Парсер цен с маркетплейсов: ggsel.net, funpay.com, playerok.com.
 
-Ищет предложения по предметам Blox Fruits, MM2 и YBA через поиск
-ggsel.net, сравнивает цены с рыночной средней и целевой ценой из
-config.py и возвращает выгодные предложения со ссылками на лоты.
+Ищет предложения по предметам Blox Fruits, MM2 и YBA на трёх площадках,
+сравнивает цены с рыночной медианой и целевой ценой из config.py
+и возвращает выгодные предложения со ссылками на лоты.
+
+Источники:
+  - GGSel:    поиск /search/{query} (требует маркер игры в названии лота)
+  - FunPay:   страницы лотов игр /lots/{id}/ (рынок ограничен игрой самой страницей)
+  - PlayerOK: REST API каталога api.playerok.com/v1/catalog/items (фильтр по игре)
 """
 import asyncio
 import html as htmllib
@@ -12,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from config import GAMES, PRICE_THRESHOLD_PERCENT
+from config import GAMES, PRICE_THRESHOLD_PERCENT, SOURCES
 
 BASE_URL = "https://ggsel.net"
 SEARCH_URL = BASE_URL + "/search/{query}"
@@ -24,6 +29,31 @@ CATALOG_SLUGS = {
     "mm2": "roblox-mm2",
     "yba": "roblox-yba",
 }
+
+# FunPay: страницы лотов по играм (все лоты игры на одной странице)
+FUNPAY_LOT_IDS = {
+    "blox_fruits": 1155,
+    "mm2": 925,
+    "yba": 921,
+}
+
+# FunPay: категории лотов, которые не являются предметами для трейда
+# (услуги, гайды, аккаунты и т.п. искажают рыночную цену предметов)
+FUNPAY_EXCLUDED_CATS = {
+    "Услуги", "Услуга", "Gamepass", "Гайды", "Аккаунты",
+    "VIP-сервер", "Почта", "Буст", "Промокоды",
+}
+
+# PlayerOK: Roblox, категория «Предметы» и сервер-значения игр в фильтре
+PLAYEROK_GAME_ID = "1ecc48ce-4f1a-6531-300d-9faaa8c3ab04"
+PLAYEROK_ITEMS_CATEGORY = "1ecc48ce-52e6-6010-c327-d8c26efee5e3"
+PLAYEROK_SERVERS = {
+    "blox_fruits": "bloxfruits",
+    "mm2": "murdermystery2",
+    "yba": "yba",
+}
+PLAYEROK_API = "https://api.playerok.com/v1/catalog/items"
+PLAYEROK_PAGE_SIZE = 100
 
 # Слова-маркеры: по ним видно, к какой игре относится товар.
 # Требуются для ВСЕХ предметов — иначе «Dragon Fruit» из King Legacy
@@ -113,8 +143,14 @@ def _has_game_marker(offer_name: str, game_key: str) -> bool:
     return False
 
 
-def _matches_item(item_name: str, offer_name: str, game_key: str) -> bool:
-    """Подходит ли лот под отслеживаемый предмет"""
+def _matches_item(item_name: str, offer_name: str, game_key: str,
+                  require_marker: bool = True) -> bool:
+    """Подходит ли лот под отслеживаемый предмет.
+
+    require_marker=False — для источников, где игра ограничена самой
+    площадкой (страница лотов FunPay, фильтр сервера PlayerOK):
+    маркер игры в названии лота не обязателен.
+    """
     item_words = [_fix_word(w) for w in _norm(item_name)]
     if not item_words or not offer_name:
         return False
@@ -124,14 +160,17 @@ def _matches_item(item_name: str, offer_name: str, game_key: str) -> bool:
     for w in item_words:
         if not _word_matches(w, offer_words):
             return False
-    # Лот обязан быть привязан к игре маркером в названии —
+    # Для поиска (GGSel) лот обязан быть привязан к игре маркером в названии —
     # так отсекаются чужие игры (King Legacy, Grow a Garden и т.п.)
-    return _has_game_marker(offer_name, game_key)
+    if require_marker:
+        return _has_game_marker(offer_name, game_key)
+    return True
 
 
-def _is_relevant_offer(item_name: str, offer_name: str, game_key: str) -> bool:
+def _is_relevant_offer(item_name: str, offer_name: str, game_key: str,
+                       require_marker: bool = True) -> bool:
     """Лот подходит по предмету и не является другой версией товара"""
-    if not _matches_item(item_name, offer_name, game_key):
+    if not _matches_item(item_name, offer_name, game_key, require_marker):
         return False
     item_l = item_name.lower()
     offer_l = offer_name.lower()
@@ -242,6 +281,170 @@ class GgselParser:
 parser = GgselParser()
 
 
+# ---------------------------------------------------------------- FunPay
+
+def parse_funpay_lots(page_html: str) -> List[Dict]:
+    """Разбор лотов на странице игры FunPay (классы tc-item)."""
+    items: List[Dict] = []
+    # <a href="https://funpay.com/lots/offer?id=N" class="tc-item ..."> ... </a>
+    for m in re.finditer(r'<a href="([^"]+)" class="tc-item[^"]*"(.*?)</a>',
+                         page_html, re.S):
+        href, block = m.group(1), m.group(2)
+        md = re.search(r'<div class="tc-desc-text">([^<]+)</div>', block)
+        if not md:
+            continue
+        title = htmllib.unescape(md.group(1)).strip()
+        # категория лота — последняя часть названия через запятую
+        parts = [p.strip() for p in title.split(",")]
+        category = parts[-1] if len(parts) > 1 else ""
+        if category in FUNPAY_EXCLUDED_CATS:
+            continue
+        # цена: точное значение в data-s, иначе текст в блоке цены
+        mp = re.search(r'data-s="([\d.]+)"', block)
+        if mp:
+            price = round(float(mp.group(1)), 2)
+        else:
+            mt = re.search(r'class="tc-price[^"]*"[^>]*>\s*<div>\s*([\d\s\xa0.,]+)', block)
+            if not mt:
+                continue
+            price_str = re.sub(r"[^\d.,]", "", mt.group(1)).replace(",", ".")
+            if not price_str:
+                continue
+            price = float(price_str)
+        if price <= 0:
+            continue
+        ms = re.search(r'<div class="media-user-name">([^<]+)</div>', block)
+        seller = ms.group(1).strip() if ms else "—"
+        items.append({
+            "name": title,
+            "price": price,
+            "url": href if href.startswith("http") else "https://funpay.com" + href,
+            "source": "FunPay",
+            "seller": seller,
+        })
+    return items
+
+
+class FunPayParser:
+    """Клиент funpay.com: страницы лотов игр, кеш и паузы между запросами"""
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+        self._last_request = 0.0
+        self._cache: Dict[str, Tuple[float, List[Dict]]] = {}
+
+    def reset(self):
+        self._cache.clear()
+
+    def _get(self, url: str) -> Optional[str]:
+        wait = REQUEST_DELAY - (time.time() - self._last_request)
+        if wait > 0:
+            time.sleep(wait)
+        for attempt in range(3):
+            try:
+                self._last_request = time.time()
+                r = self.session.get(url, timeout=30)
+                if r.status_code == 200:
+                    return r.text
+                if r.status_code == 404:
+                    return None
+            except requests.RequestException:
+                time.sleep(1 + attempt)
+        return None
+
+    def offers(self, game_key: str) -> List[Dict]:
+        """Все лоты игры (одна страница, кешируется на 10 минут)"""
+        page_id = FUNPAY_LOT_IDS.get(game_key)
+        if not page_id or "funpay" not in SOURCES:
+            return []
+        key = f"funpay:{game_key}"
+        entry = self._cache.get(key)
+        if entry and time.time() - entry[0] < CACHE_TTL:
+            return entry[1]
+        page = self._get(f"https://funpay.com/lots/{page_id}/")
+        items = parse_funpay_lots(page) if page else []
+        self._cache[key] = (time.time(), items)
+        return items
+
+
+funpay = FunPayParser()
+
+
+# ---------------------------------------------------------------- PlayerOK
+
+class PlayerokParser:
+    """Клиент REST API playerok.com: каталог предметов по играм"""
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+        self._last_request = 0.0
+        self._cache: Dict[str, Tuple[float, List[Dict]]] = {}
+
+    def reset(self):
+        self._cache.clear()
+
+    def offers(self, game_key: str) -> List[Dict]:
+        """Лоты категории «Предметы» игры (кеш на 10 минут)"""
+        server = PLAYEROK_SERVERS.get(game_key)
+        if not server or "playerok" not in SOURCES:
+            return []
+        key = f"playerok:{game_key}"
+        entry = self._cache.get(key)
+        if entry and time.time() - entry[0] < CACHE_TTL:
+            return entry[1]
+
+        items: List[Dict] = []
+        wait = REQUEST_DELAY - (time.time() - self._last_request)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            self._last_request = time.time()
+            r = self.session.post(
+                PLAYEROK_API,
+                json={
+                    "filter": {
+                        "gameIds": [PLAYEROK_GAME_ID],
+                        "gameCategoryIds": [PLAYEROK_ITEMS_CATEGORY],
+                        "attributes": [{"field": "server", "type": "SELECTOR",
+                                        "values": [server]}],
+                    },
+                    "page": {"size": PLAYEROK_PAGE_SIZE},
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": "https://playerok.com",
+                    "Referer": f"https://playerok.com/roblox/items?server={server}",
+                    "Accept": "*/*",
+                    "Accept-Language": "ru",
+                },
+                timeout=25,
+            )
+            if r.status_code == 200:
+                for it in r.json().get("items", []):
+                    name = (it.get("name") or "").strip()
+                    price = float(it.get("price") or 0)
+                    slug = it.get("slug") or ""
+                    if not name or price <= 0 or not slug:
+                        continue
+                    seller = (it.get("seller") or {}).get("username") or "—"
+                    items.append({
+                        "name": name,
+                        "price": price,
+                        "url": f"https://playerok.com/{slug}",
+                        "source": "PlayerOK",
+                        "seller": seller,
+                    })
+        except requests.RequestException:
+            pass
+        self._cache[key] = (time.time(), items)
+        return items
+
+
+playerok = PlayerokParser()
+
+
 # ---------------------------------------------------------------- поиск по предметам
 
 def _median(values: List[float]) -> float:
@@ -256,20 +459,48 @@ def _median(values: List[float]) -> float:
 
 
 async def get_item_offers(game_key: str, item_name: str) -> List[Dict]:
-    """Все подходящие лоты по предмету (поиск с запасными вариантами запроса)"""
+    """Все подходящие лоты по предмету со всех включённых источников.
+
+    GGSel — поиск с запасными вариантами запроса (нужен маркер игры),
+    FunPay и PlayerOK — лоты игр, отфильтрованные по предмету.
+    """
     def work() -> List[Dict]:
         results: List[Dict] = []
         seen = set()
-        for query in _query_variants(item_name):
-            for offer in parser.search(query):
-                if offer["url"] in seen:
-                    continue
-                if not _is_relevant_offer(item_name, offer["name"], game_key):
-                    continue
-                seen.add(offer["url"])
-                results.append(offer)
-            if results:
-                break
+
+        def add(offer: Dict):
+            if offer["url"] in seen:
+                return
+            seen.add(offer["url"])
+            results.append(offer)
+
+        # GGSel: поиск, пока запрос не дал подходящих лотов
+        if "ggsel" in SOURCES:
+            for query in _query_variants(item_name):
+                found_any = False
+                for offer in parser.search(query):
+                    if _is_relevant_offer(item_name, offer["name"], game_key):
+                        offer.setdefault("source", "GGSel")
+                        offer.setdefault("seller", "—")
+                        add(offer)
+                        found_any = True
+                if found_any:
+                    break
+
+        # FunPay: лоты страницы игры (маркер игры не нужен — игра ограничена страницей)
+        if "funpay" in SOURCES:
+            for offer in funpay.offers(game_key):
+                if _is_relevant_offer(item_name, offer["name"], game_key,
+                                      require_marker=False):
+                    add(offer)
+
+        # PlayerOK: лоты каталога «Предметы» с фильтром сервера игры
+        if "playerok" in SOURCES:
+            for offer in playerok.offers(game_key):
+                if _is_relevant_offer(item_name, offer["name"], game_key,
+                                      require_marker=False):
+                    add(offer)
+
         return results
 
     return await asyncio.to_thread(work)
@@ -286,6 +517,8 @@ async def parse_all_games(games: Optional[Dict] = None, reset_cache: bool = True
     games = games if games is not None else GAMES
     if reset_cache:
         parser.reset()
+        funpay.reset()
+        playerok.reset()
     output: List[Dict] = []
 
     for game_key, info in games.items():
@@ -317,8 +550,8 @@ async def parse_all_games(games: Optional[Dict] = None, reset_cache: bool = True
                     "discount_percent": round(stored_discount, 1),
                     "is_deal": is_deal,
                     "target_hit": target_hit,
-                    "source": "GGSel",
-                    "seller": "—",
+                    "source": offer.get("source", "GGSel"),
+                    "seller": offer.get("seller", "—"),
                     "url": offer["url"],
                 })
     return output
