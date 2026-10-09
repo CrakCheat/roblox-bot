@@ -1,0 +1,57 @@
+name: Check deals
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # каждые 5 минут (UTC)
+  workflow_dispatch:         # кнопка "Run workflow" — проверить вручную
+
+# Нужно для git push (сохранение базы в репозиторий)
+permissions:
+  contents: write
+
+# Не запускать вторую проверку, пока идёт предыдущая
+concurrency:
+  group: check-deals
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check deals and send notifications
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: python check_once.py
+
+      # deals.db (подписки, сделки, история цен) сохраняется в репозиторий,
+      # run_day.txt меняется раз в день — чтобы GitHub не отключил
+      # расписание за 60 дней «без активности» репозитория.
+      # if: always() — база сохраняется, даже если проверка завершилась ошибкой.
+      - name: Save database and keep repo active
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          date -u +%Y-%m-%d > run_day.txt
+          git add run_day.txt
+          git add -f deals.db
+          if git diff --cached --quiet; then
+            echo "Изменений нет — коммит не нужен"
+          else
+            git commit -m "chore: обновление данных $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git push
+          fi
