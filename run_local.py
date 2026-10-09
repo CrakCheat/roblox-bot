@@ -5,10 +5,11 @@
 в Telegram только новые выгодные предложения. Уведомления об изменении
 цен убраны — только сделки.
 
-Если сеть блокирует Telegram — включите свой VPN/прокси-клиент: бот найдёт
-его автоматически (порты 10809/10808/7890/7897...) или задайте PROXY_URL
-в файле .env. Пока Telegram недоступен, сделки копятся в очереди и уйдут
-сразу, как только появится связь.
+Если Telegram недоступен (блок сети) — уведомления уходят в Discord
+(вебхук в .env: DISCORD_WEBHOOK_URL). Можно также включить свой
+VPN/прокси-клиент: бот найдёт его сам (порты 10809/10808/7890/7897...)
+или задайте PROXY_URL в файле .env — тогда сообщения пойдут в Telegram.
+Если недоступны оба канала, сделки копятся в очереди и отправятся позже.
 
 `py -3 run_local.py --once` — ровно одна проверка и выход (для тестов).
 """
@@ -29,7 +30,7 @@ import bot
 from bot import format_deal_card, run_check
 from config import (
     BOT_TOKEN, PROXY_URL, GAMES, CHECK_INTERVAL_MINUTES,
-    PRICE_THRESHOLD_PERCENT, NOTIFY_USER_IDS,
+    PRICE_THRESHOLD_PERCENT, NOTIFY_USER_IDS, DISCORD_WEBHOOK_URL,
 )
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -45,6 +46,7 @@ PROXY_CANDIDATES = [
 ]
 
 proxy = None          # рабочий прокси текущей сессии (None = напрямую)
+telegram_up = False   # есть ли сейчас связь с Telegram
 greeted = False
 
 
@@ -71,17 +73,17 @@ def _port_open(host, port) -> bool:
 
 def detect_proxy() -> str:
     """Найти способ достучаться до Telegram: .env -> напрямую -> локальный прокси."""
-    global proxy
+    global proxy, telegram_up
     # 1) явный PROXY_URL в .env — пробуем первым
     if PROXY_URL:
         if _tg_reachable(PROXY_URL):
-            proxy = PROXY_URL
+            proxy, telegram_up = PROXY_URL, True
             print(f"✅ Telegram через PROXY_URL: {PROXY_URL}")
             return proxy
         print(f"⚠️ PROXY_URL={PROXY_URL} не отвечает — пробую другие варианты...")
     # 2) напрямую (например, включённый VPN в режиме TUN)
     if _tg_reachable(None):
-        proxy = None
+        proxy, telegram_up = None, True
         print("✅ Telegram доступен напрямую")
         return None
     # 3) локальные порты прокси-клиентов
@@ -91,12 +93,17 @@ def detect_proxy() -> str:
         if not _port_open(host, int(port)):
             continue
         if _tg_reachable(cand):
-            proxy = cand
+            proxy, telegram_up = cand, True
             print(f"✅ Telegram через локальный прокси: {cand}")
             return cand
-    proxy = None
-    print("⏳ Telegram недоступен: включите свой VPN/прокси-клиент.")
-    print("   Сделки не потеряются — накопятся и отправятся после подключения.")
+    proxy, telegram_up = None, False
+    if DISCORD_WEBHOOK_URL:
+        print("⏳ Telegram недоступен — уведомления пойдут в Discord.")
+        print("   Включите VPN/прокси-клиент — бот снова сможет писать в Telegram.")
+    else:
+        print("⏳ Telegram недоступен: включите свой VPN/прокси-клиент")
+        print("   или задайте DISCORD_WEBHOOK_URL в файле .env.")
+        print("   Сделки не потеряются — накопятся и отправятся позже.")
     return None
 
 
@@ -122,6 +129,46 @@ def tg_send(chat_id: int, text: str) -> bool:
         return False
 
 
+def _discord_chunks(s: str, limit: int = 1900):
+    """Разбить длинный текст на части не длиннее лимита Discord (2000 символов)."""
+    parts, cur = [], ""
+    for para in s.split("\n\n"):
+        cand = para if not cur else cur + "\n\n" + para
+        if len(cand) > limit and cur:
+            parts.append(cur)
+            cur = para
+        else:
+            cur = cand
+        while len(cur) > limit:
+            parts.append(cur[:limit])
+            cur = cur[limit:]
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def discord_send(text: str) -> bool:
+    """Отправить сообщение в Discord-вебхук (запасной канал, если Telegram лежит)."""
+    if not DISCORD_WEBHOOK_URL:
+        return False
+    # у Telegram **bold** пишется как *bold*, у Discord — как **bold**
+    text = text.replace("*", "**")
+    for part in _discord_chunks(text):
+        try:
+            r = requests.post(
+                DISCORD_WEBHOOK_URL,
+                json={"content": part, "allowed_mentions": {"parse": []}},
+                timeout=20,
+            )
+            if r.status_code not in (200, 204):
+                print(f"  ❌ Discord отклонил сообщение ({r.status_code}): {r.text[:150]}")
+                return False
+        except Exception as e:
+            print(f"  ⚠️ Ошибка Discord: {e}")
+            return False
+    return True
+
+
 async def maybe_greet():
     """Приветствие при первом запуске — подтверждает, что сообщения уходят."""
     global greeted
@@ -138,10 +185,15 @@ async def maybe_greet():
         f"(проверка каждые {CHECK_INTERVAL_MINUTES} мин).\n"
         "Изменения цен не рассылаю — только выгодные сделки."
     )
-    for user_id in NOTIFY_USER_IDS:
-        if tg_send(user_id, hello):
-            greeted = True
-            print("✅ Приветствие отправлено")
+    if telegram_up:
+        for user_id in NOTIFY_USER_IDS:
+            if tg_send(user_id, hello):
+                greeted = True
+                print("✅ Приветствие отправлено в Telegram")
+                return
+    if discord_send(hello):
+        greeted = True
+        print("✅ Приветствие отправлено в Discord")
 
 
 async def send_queue():
@@ -158,18 +210,26 @@ async def send_queue():
             text += format_deal_card(deal)
 
         delivered = False
-        for user_id in NOTIFY_USER_IDS:
-            if tg_send(user_id, text):
-                ok += 1
-                delivered = True
-            else:
-                fail += 1
+        via_discord = False
+        if telegram_up:
+            for user_id in NOTIFY_USER_IDS:
+                if tg_send(user_id, text):
+                    ok += 1
+                    delivered = True
+                else:
+                    fail += 1
+        # Telegram не работает — отправляем в Discord
+        if not delivered and discord_send(text):
+            ok += 1
+            delivered = True
+            via_discord = True
         if delivered:
             for deal in deals:
                 await bot.db.mark_as_notified(deal["id"])
-            print(f"  📨 Отправлено сделок ({game_name}): {len(deals)}")
-        elif NOTIFY_USER_IDS:
-            print(f"  ⏳ Отложено ({game_name}): {len(deals)} — Telegram недоступен")
+            chan = "Discord" if via_discord else "Telegram"
+            print(f"  📨 Отправлено в {chan} ({game_name}): {len(deals)}")
+        else:
+            print(f"  ⏳ Отложено ({game_name}): {len(deals)} — ни Telegram, ни Discord недоступны")
     return ok, fail
 
 
@@ -180,6 +240,7 @@ async def main() -> int:
     print(f"🎮 Игры: {', '.join(g.get('name', k) for k, g in GAMES.items())}")
     print(f"⏱ Проверка: каждые {CHECK_INTERVAL_MINUTES} минут")
     print(f"📨 Уведомления: {NOTIFY_USER_IDS or 'НЕ ЗАДАНЫ — заполните NOTIFY_USER_IDS в config.py'}")
+    print(f"💬 Discord-вебхук: {'задан' if DISCORD_WEBHOOK_URL else 'не задан (DISCORD_WEBHOOK_URL в .env)'}")
     if once:
         print("⚙️ Режим --once: ровно одна проверка и выход")
     print("=" * 62)
@@ -206,7 +267,7 @@ async def main() -> int:
             await maybe_greet()
             sent, fail = await send_queue()
             print(f"📨 Отправлено: {sent}, ошибок: {fail}")
-            if fail:
+            if fail or not telegram_up:
                 detect_proxy()  # вдруг VPN включили или выключили
         except Exception as e:
             print(f"❌ Ошибка проверки: {e}")

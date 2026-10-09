@@ -10,6 +10,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "ВАШ_ТОКЕН_СЮДА")
 # Пример: PROXY_URL=socks5://127.0.0.1:1080 (обычно пусто)
 PROXY_URL = os.getenv("PROXY_URL", "").strip()
 
+# Discord вебхук — запасной канал уведомлений, когда Telegram недоступен.
+# Хранится в .env (в git не попадает): DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+
 # Настройки базы данных (в облаке можно переопределить: DB_PATH=/data/deals.db)
 DB_PATH = os.getenv("DB_PATH", "deals.db")
 
