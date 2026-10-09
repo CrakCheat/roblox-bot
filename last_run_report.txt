@@ -1,0 +1,14 @@
+=== Проверка выгодных предложений (GitHub Actions) — 2026-10-09 11:12 UTC ===
+Новых выгодных предложений: 5
+  + [PlayerOK] Yeti: 120 ₽ (рынок 159 ₽, -24.5%) https://playerok.com/c23d80f926ca-frukt-yeti
+  + [PlayerOK] Lucky Arrow: 129 ₽ (рынок 199 ₽, -35.2%) https://playerok.com/1c1dc5fee7f5-yba-10x-lucky-arrobystro-bezopasno
+  + [PlayerOK] Lucky Arrow: 139 ₽ (рынок 199 ₽, -30.2%) https://playerok.com/6e204c92bd16-10-lucky-arrows-10-laki-strel-25-rokak
+  + [PlayerOK] Lucky Arrow: 129 ₽ (рынок 199 ₽, -35.2%) https://playerok.com/e707e8993dd4-ttd-gladiator-10-000-gemov
+  + [PlayerOK] Lucky Arrow: 139 ₽ (рынок 199 ₽, -30.2%) https://playerok.com/810d56e393d3-lucky-arrows-10-laki-strel-za-125-rubley-deshevo
+Всего сделок в базе: 248 | по источникам: {'FunPay': 216, 'GGSel': 17, 'PlayerOK': 15}
+Отправлено сделок по игре Blox Fruits: 5
+Отправлено сделок по игре Your Bizarre Adventure: 5
+Отправлено сделок по игре Murder Mystery 2: 5
+Отправлено сообщений: 8, ошибок отправки: 0
+База: deals.db
+=== Готово ===
