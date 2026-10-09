@@ -98,7 +98,7 @@ async def main() -> int:
             "✅ *Бот запущен и следит за ценами!*\n\n"
             f"🎮 Игры: {', '.join(g.get('name', k) for k, g in GAMES.items())}\n"
             f"🏪 Источники: GGSel, FunPay, PlayerOK\n"
-            "🔔 Уведомления о выгодных лотах придут, как только появятся сделки.\n\n"
+            "🔔 Пришлю, как только появится лот дешевле цен из config.py.\n\n"
             "Свой список товаров: правьте config.py на GitHub "
             "(файл → ✏️ → Commit changes)."
         )

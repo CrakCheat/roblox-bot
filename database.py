@@ -22,10 +22,20 @@ class Database:
                     source TEXT NOT NULL,
                     seller TEXT,
                     url TEXT,
+                    offer_name TEXT,
+                    target_price REAL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     is_notified INTEGER DEFAULT 0
                 )
             """)
+
+            # Миграция старых баз: добавляем новые колонки, если их нет
+            cursor = await db.execute("PRAGMA table_info(deals)")
+            deal_cols = {row[1] for row in await cursor.fetchall()}
+            if "offer_name" not in deal_cols:
+                await db.execute("ALTER TABLE deals ADD COLUMN offer_name TEXT")
+            if "target_price" not in deal_cols:
+                await db.execute("ALTER TABLE deals ADD COLUMN target_price REAL DEFAULT 0")
             
             # Таблица для хранения рыночных цен
             await db.execute("""
@@ -96,14 +106,16 @@ class Database:
 
     async def add_deal(self, game: str, item_name: str, price: float, 
                        market_price: float, discount_percent: float, 
-                       source: str, seller: str = None, url: str = None) -> int:
+                       source: str, seller: str = None, url: str = None,
+                       offer_name: str = "", target_price: float = 0) -> int:
         """Добавление нового предложения, возвращает ID записи"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
                 INSERT INTO deals (game, item_name, price, market_price, 
-                                 discount_percent, source, seller, url)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (game, item_name, price, market_price, discount_percent, source, seller, url))
+                                 discount_percent, source, seller, url,
+                                 offer_name, target_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (game, item_name, price, market_price, discount_percent, source, seller, url, offer_name, target_price))
             await db.commit()
             return cursor.lastrowid
 

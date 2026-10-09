@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from config import GAMES, PRICE_THRESHOLD_PERCENT, SOURCES
+from config import GAMES, PRICE_THRESHOLD_PERCENT, REQUIRE_TARGET_PRICE, SOURCES
 
 BASE_URL = "https://ggsel.net"
 SEARCH_URL = BASE_URL + "/search/{query}"
@@ -535,7 +535,12 @@ async def parse_all_games(games: Optional[Dict] = None, reset_cache: bool = True
             for offer in offers:
                 discount = ((med - offer["price"]) / med * 100) if med > 0 else 0.0
                 target_hit = 0 < ref and offer["price"] <= ref
-                is_deal = discount >= PRICE_THRESHOLD_PERCENT or target_hit
+                # REQUIRE_TARGET_PRICE=True — уведомляем только о лотах
+                # дешевле цены из config.py; иначе подходит и скидка от рынка.
+                if REQUIRE_TARGET_PRICE and ref > 0:
+                    is_deal = target_hit
+                else:
+                    is_deal = discount >= PRICE_THRESHOLD_PERCENT or target_hit
                 # для сделок скидка не меньше порога — чтобы попасть в уведомления
                 stored_discount = max(discount, float(PRICE_THRESHOLD_PERCENT)) if is_deal else discount
                 output.append({

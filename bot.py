@@ -23,6 +23,7 @@ from parsers import parse_all_games, init_market_prices_with_api
 from price_tracker import PriceTracker
 from config import (
     BOT_TOKEN, PROXY_URL, DB_PATH, GAMES, CHECK_INTERVAL_MINUTES, PRICE_THRESHOLD_PERCENT,
+    REQUIRE_TARGET_PRICE,
     SUGGEST_ITEM_ENABLED, SUGGEST_ITEM_MIN_COUNT, SUGGEST_ITEM_MIN_PRICE, 
     SUGGEST_ITEM_MAX_PRICE, WHITELIST_ENABLED, WHITELIST_USERS, ADMIN_IDS
 )
@@ -349,11 +350,17 @@ def format_deal_card(deal) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 *{_md(deal['item_name'])}*\n"
     )
+    # Полное название лота от продавца (как на маркетплейсе)
     if deal.get('offer_name'):
-        card += f"🏷 {_md(deal['offer_name'])[:70]}\n"
+        card += f"🏷 {_md(deal['offer_name'])}\n"
     card += (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Цена: *{deal['price']:.0f} ₽*\n"
+    )
+    # Цена из config.py, ниже которой мы и уведомляем
+    if deal.get('target_price'):
+        card += f"🎯 Моя цена: {deal['target_price']:.0f} ₽ — лот дешевле ✅\n"
+    card += (
         f"📊 Рыночная цена: {deal['market_price']:.0f} ₽\n"
         f"📉 Скидка: *{deal['discount_percent']:.1f}%*\n"
         f"🏪 Источник: {deal['source']}\n"
@@ -398,7 +405,8 @@ async def run_check() -> list:
             offer['id'] = await db.add_deal(
                 offer['game'], offer['item_name'], offer['price'],
                 offer['market_price'], offer['discount_percent'],
-                offer['source'], offer['seller'], offer['url']
+                offer['source'], offer['seller'], offer['url'],
+                offer.get('offer_name', ''), offer.get('target_price', 0)
             )
             added.append(offer)
     return added
@@ -743,8 +751,12 @@ async def add_item_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎮 Игра: {game_name}\n"
         f"📦 Предмет: {_md(item_name)}\n"
         f"💰 Целевая цена: {price:.0f} ₽\n\n"
-        f"Я сообщу, когда появится предложение дешевле рынка "
-        f"на {PRICE_THRESHOLD_PERCENT}% или дешевле {price:.0f} ₽.",
+        + (
+            f"Я сообщу, как только появится лот дешевле {price:.0f} ₽."
+            if REQUIRE_TARGET_PRICE else
+            f"Я сообщу, когда появится предложение дешевле рынка "
+            f"на {PRICE_THRESHOLD_PERCENT}% или дешевле {price:.0f} ₽."
+        ),
         parse_mode='Markdown'
     )
 
