@@ -37,7 +37,8 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: python check_once.py
 
-      # deals.db (подписки, сделки, история цен) сохраняется в репозиторий,
+      # deals.db (подписки, сделки, история цен) и last_run_report.txt
+      # (итог последней проверки) сохраняются в репозиторий,
       # run_day.txt меняется раз в день — чтобы GitHub не отключил
       # расписание за 60 дней «без активности» репозитория.
       # if: always() — база сохраняется, даже если проверка завершилась ошибкой.
@@ -48,7 +49,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           date -u +%Y-%m-%d > run_day.txt
           git add run_day.txt
-          git add -f deals.db
+          git add -f deals.db 2>/dev/null || true
+          git add -f last_run_report.txt 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "Изменений нет — коммит не нужен"
           else

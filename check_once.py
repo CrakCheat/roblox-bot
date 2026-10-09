@@ -3,9 +3,13 @@
 Запускается workflow'ом каждые 5 минут. Без long-polling: только уведомления.
 Подписки и списки хранятся в deals.db (коммитится в репозиторий),
 пользовательский список также редактируется в config.py прямо на GitHub.
+
+Итог каждого запуска пишется в last_run_report.txt (коммитится в репозиторий) —
+по нему видно, что происходило, даже без доступа к логам Actions.
 """
 import asyncio
 import sys
+from datetime import datetime, timezone
 
 # Корректный вывод эмодзи в логах CI
 try:
@@ -20,6 +24,15 @@ from bot import _md, format_deal_card, run_check
 from config import (
     BOT_TOKEN, GAMES, NOTIFY_USER_IDS, PRICE_THRESHOLD_PERCENT, DB_PATH,
 )
+
+REPORT_PATH = "last_run_report.txt"
+report: list = []
+
+
+def log(line: str = ""):
+    """Печать в лог CI и запись в отчёт"""
+    print(line)
+    report.append(line)
 
 
 def tg_send(chat_id: int, text: str) -> bool:
@@ -39,33 +52,64 @@ def tg_send(chat_id: int, text: str) -> bool:
         data = r.json()
         if data.get("ok"):
             return True
-        print(f"  Telegram отклонил сообщение для {chat_id}: {data.get('description')}")
+        desc = data.get("description", "")
+        log(f"  Telegram отклонил сообщение для {chat_id}: {desc}")
+        if "chat not found" in desc or "bot was blocked" in desc:
+            log("  ⚠️ Напишите боту /start в Telegram — иначе он не сможет вам писать!")
     except Exception as e:
-        print(f"  Ошибка отправки для {chat_id}: {e}")
+        log(f"  Ошибка отправки для {chat_id}: {e}")
     return False
 
 
 async def main() -> int:
-    print("=== Проверка выгодных предложений (GitHub Actions) ===")
+    started = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    log(f"=== Проверка выгодных предложений (GitHub Actions) — {started} ===")
 
     if not BOT_TOKEN or BOT_TOKEN == "ВАШ_ТОКЕН_СЮДА":
-        print("❌ BOT_TOKEN не задан! Добавьте секрет BOT_TOKEN в Settings -> Secrets -> Actions")
+        log("❌ BOT_TOKEN не задан! Добавьте секрет BOT_TOKEN в Settings -> Secrets -> Actions")
+        open(REPORT_PATH, "w", encoding="utf-8").write("\n".join(report))
         return 1
 
     if not NOTIFY_USER_IDS:
-        print("⚠️ NOTIFY_USER_IDS пуст в config.py — некому слать уведомления")
+        log("⚠️ NOTIFY_USER_IDS пуст в config.py — некому слать уведомления")
 
     await bot.db.init()
 
-    # Основная проверка: парсинг ggsel, рынок, сделки, история цен
+    # Основная проверка: парсинг (GGSel + FunPay + PlayerOK), рынок, сделки, история
     added = await run_check()
-    print(f"Новых выгодных предложений: {len(added)}")
+    log(f"Новых выгодных предложений: {len(added)}")
     for d in added:
-        print(f"  + {d['item_name']}: {d['price']:.0f} ₽ (рынок {d['market_price']:.0f} ₽, "
-              f"-{d['discount_percent']:.1f}%) {d['url']}")
+        log(f"  + [{d['source']}] {d['item_name']}: {d['price']:.0f} ₽ "
+            f"(рынок {d['market_price']:.0f} ₽, -{d['discount_percent']:.1f}%) {d['url']}")
+
+    # Диагностика: сколько сделок по источникам в базе вообще
+    by_source = await bot.db.count_deals_by_source()
+    total = await bot.db.count_deals()
+    log(f"Всего сделок в базе: {total}" + (f" | по источникам: {by_source}" if by_source else ""))
+
+    sent_ok, send_fail = 0, 0
+
+    # Первый запуск: приветствие + проверка, что бот вообще может писать.
+    # Если пользователь не нажал /start — Telegram вернёт «chat not found»,
+    # и это будет видно в отчёте.
+    notified_ever = await bot.db.count_deals(notified=True)
+    if notified_ever == 0 and NOTIFY_USER_IDS:
+        hello = (
+            "✅ *Бот запущен и следит за ценами!*\n\n"
+            f"🎮 Игры: {', '.join(g.get('name', k) for k, g in GAMES.items())}\n"
+            f"🏪 Источники: GGSel, FunPay, PlayerOK\n"
+            "🔔 Уведомления о выгодных лотах придут, как только появятся сделки.\n\n"
+            "Свой список товаров: правьте config.py на GitHub "
+            "(файл → ✏️ → Commit changes)."
+        )
+        for user_id in NOTIFY_USER_IDS:
+            if tg_send(user_id, hello):
+                sent_ok += 1
+                log(f"Приветствие отправлено пользователю {user_id}")
+            else:
+                send_fail += 1
 
     # Отправляем все неуведомленные сделки (в т.ч. если прошлая отправка падала)
-    sent_ok, send_fail = 0, 0
     for game_key in GAMES:
         deals = await bot.db.get_unnotified_deals(game_key, PRICE_THRESHOLD_PERCENT)
         if not deals:
@@ -88,8 +132,9 @@ async def main() -> int:
         if delivered:
             for deal in deals:
                 await bot.db.mark_as_notified(deal['id'])
+            log(f"Отправлено сделок по игре {game_name}: {len(deals)}")
         else:
-            print(f"  Не удалось отправить сделки по игре {game_key} — останутся в очереди")
+            log(f"  Не удалось отправить сделки по игре {game_key} — останутся в очереди")
 
     # Оповещения о резких изменениях цен (>=15% за сутки)
     alerts = await bot.price_tracker.get_price_alerts(change_threshold=15)
@@ -106,14 +151,20 @@ async def main() -> int:
             if tg_send(user_id, text):
                 sent_ok += 1
 
-    print(f"Отправлено сообщений: {sent_ok}, ошибок отправки: {send_fail}")
-    print(f"База: {DB_PATH}")
+    log(f"Отправлено сообщений: {sent_ok}, ошибок отправки: {send_fail}")
+    log(f"База: {DB_PATH}")
 
-    # Сделки есть, а Telegram недоступен — даём красный крест в Actions
-    if added and sent_ok == 0 and NOTIFY_USER_IDS:
-        print("❌ Есть сделки, но ни одно сообщение не ушло — проверьте секрет BOT_TOKEN")
+    # Сохраняем отчёт (его коммитит workflow — виден в репозитории)
+    log("=== Готово ===")
+    with open(REPORT_PATH, "w", encoding="utf-8") as f:
+        f.write("\n".join(report))
+
+    # Сделки есть, а ни одно сообщение не ушло — красный крест в Actions
+    if (added or total) and sent_ok == 0 and send_fail > 0 and NOTIFY_USER_IDS:
+        log("❌ Есть сделки, но сообщения не уходят — вероятно, боту не написали /start")
+        with open(REPORT_PATH, "w", encoding="utf-8") as f:
+            f.write("\n".join(report))
         return 1
-    print("=== Готово ===")
     return 0
 
 

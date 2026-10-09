@@ -134,6 +134,26 @@ class Database:
             """, (url, price))
             return await cursor.fetchone() is not None
 
+    async def count_deals(self, notified: bool = None) -> int:
+        """Всего сделок (при notified=None) или по флагу уведомления"""
+        async with aiosqlite.connect(self.db_path) as db:
+            if notified is None:
+                cursor = await db.execute("SELECT COUNT(*) FROM deals")
+            else:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM deals WHERE is_notified = ?",
+                    (1 if notified else 0,))
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
+    async def count_deals_by_source(self) -> Dict[str, int]:
+        """Сколько сделок найдено по каждому источнику"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT source, COUNT(*) FROM deals GROUP BY source")
+            rows = await cursor.fetchall()
+            return {(src or "?"): cnt for src, cnt in rows}
+
     async def mark_as_notified(self, deal_id: int):
         """Отметить предложение как уведомленное"""
         async with aiosqlite.connect(self.db_path) as db:
