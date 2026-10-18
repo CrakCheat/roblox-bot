@@ -17,7 +17,8 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
-from config import GAMES, PRICE_THRESHOLD_PERCENT, REQUIRE_TARGET_PRICE, SOURCES
+from config import (GAMES, PRICE_THRESHOLD_PERCENT, REQUIRE_TARGET_PRICE,
+                    SOURCES, EUR_TO_RUB, USD_TO_RUB)
 
 BASE_URL = "https://ggsel.net"
 SEARCH_URL = BASE_URL + "/search/{query}"
@@ -264,6 +265,51 @@ def get_candidates() -> List[Dict]:
     return out
 
 
+# ---------------------------------------------------------------- курсы валют
+_RATES: Dict[str, float] = {}
+_RATES_TS = 0.0
+_RATES_TTL = 12 * 3600  # обновлять курс не чаще раза в 12 часов
+_RATE_FALLBACK = {"USD": USD_TO_RUB, "EUR": EUR_TO_RUB}
+
+
+def get_rate(code: str) -> float:
+    """Курс валюты в рублях (ЦБ РФ, XML_daily.asp).
+
+    Кеш на 12 часов; при недоступности сайта — повтор через час,
+    до тех пор возвращается запасной курс из config.py.
+    """
+    global _RATES_TS
+    if time.time() - _RATES_TS > _RATES_TTL:
+        try:
+            resp = requests.get("https://www.cbr.ru/scripts/XML_daily.asp",
+                                timeout=15)
+            resp.raise_for_status()
+            for cur in ("USD", "EUR"):
+                m = re.search(
+                    r"CharCode>%s</CharCode>.*?<VunitRate>([\d,]+)</VunitRate>"
+                    % cur, resp.text, re.S)
+                if m:
+                    _RATES[cur] = float(m.group(1).replace(",", "."))
+            _RATES_TS = time.time()
+        except Exception:
+            _RATES_TS = time.time() - 11 * 3600  # ошибка — повторить через час
+    return _RATES.get(code, _RATE_FALLBACK[code])
+
+
+def to_rubles(price: float, unit: str) -> float:
+    """Перевести цену лота в рубли.
+
+    FunPay при чужом IP/VPN отдаёт цены в $ и € — без перевода
+    бот считал такие лоты рублёвыми и слал мусор («Harvester 6 ₽»).
+    """
+    u = unit or "₽"
+    if "$" in u:
+        return round(price * get_rate("USD"), 2)
+    if "€" in u:
+        return round(price * get_rate("EUR"), 2)
+    return round(price, 2)
+
+
 # ---------------------------------------------------------------- парсинг HTML
 
 def parse_cards(page_html: str) -> List[Dict]:
@@ -272,16 +318,24 @@ def parse_cards(page_html: str) -> List[Dict]:
     for chunk in page_html.split('data-testid="card" data-test="item"')[1:]:
         m_link = re.search(r'data-testid="card-link"[^>]*href="([^"]+)"', chunk)
         m_alt = re.search(r'<img alt="([^"]+)"', chunk)
-        m_price = re.search(r'data-test="price">([\d\s\xa0]+)\s*₽', chunk)
+        m_price = re.search(r'data-test="price">([\d\s\xa0.,]+)\s*(₽|\$|€)?', chunk)
         if not (m_link and m_price):
             continue
-        price_str = re.sub(r"[^\d]", "", m_price.group(1))
+        price_str = m_price.group(1).strip().replace("\xa0", "").replace(" ", "")
         if not price_str:
+            continue
+        if "," in price_str and "." not in price_str:
+            price_str = price_str.replace(",", ".")  # европейская запись: 12,50
+        else:
+            price_str = re.sub(r"[^\d.]", "", price_str)  # 1 234.56 → 1234.56
+        try:
+            price = to_rubles(float(price_str), m_price.group(2) or "₽")
+        except ValueError:
             continue
         href = m_link.group(1)
         items.append({
             "name": htmllib.unescape(m_alt.group(1)) if m_alt else "",
-            "price": float(price_str),
+            "price": price,
             "url": BASE_URL + href if href.startswith("/") else href,
         })
     return items
@@ -374,6 +428,7 @@ def parse_funpay_lots(page_html: str) -> List[Dict]:
         mp = re.search(r'data-s="([\d.]+)"', block)
         if mp:
             price = round(float(mp.group(1)), 2)
+            unit_src = block[mp.end():]
         else:
             mt = re.search(r'class="tc-price[^"]*"[^>]*>\s*<div>\s*([\d\s\xa0.,]+)', block)
             if not mt:
@@ -382,6 +437,11 @@ def parse_funpay_lots(page_html: str) -> List[Dict]:
             if not price_str:
                 continue
             price = float(price_str)
+            unit_src = block[mt.end():]
+        # валюта лота — <span class="unit">$</span> и т.п.
+        # (FunPay при чужом IP показывает $/€ — переводим в рубли)
+        mu = re.search(r'<span class="unit[^"]*">([^<]*)</span>', unit_src)
+        price = to_rubles(price, mu.group(1) if mu else "₽")
         if price <= 0:
             continue
         ms = re.search(r'<div class="media-user-name">([^<]+)</div>', block)
